@@ -1,0 +1,198 @@
+---
+title: "Sentiment analysis twitter"
+author: "Miriam Lim Leal"
+date: "2026-03-26"
+output: html_document
+---
+
+## Sentiment analysis Twitter
+
+```{r}
+library(tidyverse)
+library(tidytext)
+library(textdata)
+library(emoji)
+library(readxl)
+library(stringi)
+library(syuzhet)
+library(udpipe)
+```
+
+### 1. Load data
+
+```{r}
+twitter_data <- read.csv("tweets_political_parties_es.csv", colClasses = c(id = "character"))
+```
+
+### 2. Clean tweet text
+
+#### General pipeline 
+
+Remove URLs, mentions and normalise whitespace
+
+```{r}
+clean_general <- function(text) {
+  
+  # Remove URLs
+  text <- str_remove_all(text, "https?://\\S+")
+  
+  # Remove mentions
+  text <- str_remove_all(text, "@\\w+")
+  
+  # Normalize whitespace
+  text <- str_squish(text)
+  
+  return(text)
+}
+```
+
+```{r}
+twitter_transformer <- twitter_data |> 
+  mutate(text_clean = map_chr(tweet, clean_general))
+```
+
+### 3. Lexicon-based models
+
+#### CSV emoji mapping in Spanish
+
+Load the Spanish emoji mapping (Emoji-SP).
+
+```{r}
+emoji_map <- read_excel("emoji_mapping_es.xlsx") |> 
+  mutate(definition_lower = str_to_lower(definition)) |> 
+  select(emoji, definition_lower, val)
+```
+
+#### Function replace emojis with text using Emoji-SP
+
+```{r}
+# This replaces the emoji symbol with the Spanish definition from Emoji-SP file
+replace_emoji_with_def <- function(text, lexicon) {
+  # We use stri_replace_all_fixed to swap emoji symbols for definitions
+  # We add spaces and a prefix 'EMOJI_' to help the model distinguish it
+  new_text <- stri_replace_all_fixed(
+    text, 
+    lexicon$emoji, 
+    paste0(" ", lexicon$definition_lower, " "), 
+    vectorize_all = FALSE
+  )
+  return(new_text)
+}
+```
+
+Create a new column with emoji replaced text called emoji_text
+
+```{r}
+twitter_lexicon <- twitter_transformer %>%
+  mutate(emoji_text = sapply(text_clean, replace_emoji_with_def, lexicon = emoji_map))
+```
+
+
+#### Lexicon-specific cleaning pipeline 
+
+clean data (specifically column emoji_text): drop hashtags symbols, remove punctuation and make everything lowercase.
+
+```{r}
+clean_lexicon <- function(text) {
+  
+  # Keep hashtag words, drop the symbol
+  text <- str_replace_all(text, "#(\\w+)", "\\1")
+  
+  # Remove all punctuation
+  text <- str_remove_all(text, "[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~¡¿]")
+  
+  # Lowercase for lexicon matching
+  text <- str_to_lower(text)
+  
+  # Normalize whitespace again after removals
+  text <- str_squish(text)
+  
+  return(text)
+}
+```
+
+
+```{r}
+twitter_lexicon <- twitter_data |> 
+  mutate(
+    # Step 1: shared cleaning (URLs, mentions, whitespace)
+    text_clean = map_chr(tweet, clean_general),
+    
+    # Step 2: replace emojis with Spanish definitions (applied to text_clean)
+    emoji_text        = map_chr(text_clean, replace_emoji_with_def, lexicon = emoji_map),
+    
+    # Step 3: lexicon cleaning (hashtags, punctuation, lowercase)
+    clean_lexicon_text = map_chr(emoji_text, clean_lexicon)
+  ) |>
+  select(-emoji_text)    
+```
+
+Save this as a csv
+```{r}
+# write.csv(twitter_lexicon, "twitter_lexicon_and_transformer_clean.csv", row.names = FALSE)
+```
+
+
+#### 1. Lexicon model: NRC
+
+Lemmatize the text function
+
+```{r}
+# Function to lemmatize Spanish text
+lemmatize_spanish <- function(text, model) {
+  # If text is empty, return empty
+  if (nchar(text) == 0) return("")
+  
+  # Annotate the text
+  annotation <- udpipe_annotate(model, x = text)
+  df <- as.data.frame(annotation)
+  
+  # Paste the 'lemma' column back together into a single string
+  lemmatized_text <- paste(df$lemma, collapse = " ")
+  return(lemmatized_text)
+}
+```
+
+Download the Spanish model
+
+```{r}
+# udpipe_download_model(language = "spanish")  # only download once
+ud_model <- udpipe_load_model("spanish-gsd-ud-2.5-191206.udpipe")
+```
+
+Apply lemmatisation to the text (clean_lexicon_text) REVISE
+
+```{r}
+# twitter_lexicon <- twitter_lexicon |> 
+#  mutate(lemmatized_text = map_chr(clean_lexicon_text, lemmatize_spanish, model = ud_model))
+```
+
+After it has been run once, save to use for other models
+
+```{r}
+#write.csv(twitter_lexicon, "twitter_lexicon_lemmatized.csv", row.names = FALSE)
+```
+
+
+Run NRC 
+
+```{r}
+nrc_results <- get_nrc_sentiment(twitter_lexicon$clean_lexicon_text, language = "spanish")
+```
+
+```{r}
+# Bind the id and tweet columns from twitter_lexicon to the NRC results
+nrc_results <- bind_cols(
+  twitter_lexicon |> select(id, tweet),
+  nrc_results
+)
+```
+
+Save the results of NRC 
+
+```{r}
+write.csv(nrc_results, "NRC_results.csv", row.names = FALSE)
+```
+
+
+#### 2. Lexicon model: SEL

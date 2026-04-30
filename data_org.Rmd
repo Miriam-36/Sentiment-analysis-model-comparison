@@ -1,0 +1,67 @@
+---
+title: "twitter data"
+author: "Miriam Lim Leal"
+date: "2026-03-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Open data
+
+libraries
+
+```{r}
+library(tidyverse)
+library(dplyr)
+```
+
+```{r}
+ciudadanos <- read.csv("raw_data/enviados_2020_CiudadanosCs.csv", colClasses = c(id = "character"))
+esquerra <- read.csv("raw_data/enviados_2020_Esquerra_ERC.csv", colClasses = c(id = "character"))
+podemos <- read.csv("raw_data/enviados_2020_PODEMOS.csv", colClasses = c(id = "character"))
+populares <- read.csv("raw_data/enviados_2020_populares.csv", colClasses = c(id = "character"))
+psoe <- read.csv("raw_data/enviados_2020_PSOE.csv", colClasses = c(id = "character"))
+vox <- read.csv("raw_data/enviados_2020_vox_es.csv", colClasses = c(id = "character"))
+```
+
+create a function
+
+```{r}
+filter_es <- function(df) {
+  df |> 
+    filter(language == "es") |> 
+    select(id, name, tweet)
+}
+```
+
+Apply functions to all
+```{r}
+tweets_political_parties_es <- list(ciudadanos, esquerra, podemos, populares, psoe, vox) |> 
+  lapply(filter_es) |> 
+  bind_rows()
+```
+
+
+```{r}
+tweets_political_parties_es <- tweets_political_parties_es |> 
+  mutate( political_party = case_when(
+    str_detect(name, "Ciudadanos") ~ "ciudadanos",
+    name == "Esquerra Republicana" ~ "esquerra republicana",
+    name == "PODEMOS" ~ "podemos",
+    name == "Partido Popular" ~ "partido popular",
+    name == "PSOE" ~ "psoe",
+    str_detect(name, "VOX") ~ "vox"
+  )) |> 
+  select(id, political_party, tweet)
+
+tweets_political_parties_es
+```
+
+
+```{r}
+write_csv(tweets_political_parties_es, "tweets_political_parties_es.csv")
+```
+
