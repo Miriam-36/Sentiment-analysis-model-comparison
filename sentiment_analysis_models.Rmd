@@ -26,7 +26,7 @@ twitter_data <- read.csv("tweets_political_parties_es.csv", colClasses = c(id = 
 
 ### 2. Clean tweet text
 
-#### General pipeline 
+#### General pipeline
 
 Remove URLs, mentions and normalise whitespace
 
@@ -87,8 +87,7 @@ twitter_lexicon <- twitter_transformer %>%
   mutate(emoji_text = sapply(text_clean, replace_emoji_with_def, lexicon = emoji_map))
 ```
 
-
-#### Lexicon-specific cleaning pipeline 
+#### Lexicon-specific cleaning pipeline
 
 clean data (specifically column emoji_text): drop hashtags symbols, remove punctuation and make everything lowercase.
 
@@ -111,7 +110,6 @@ clean_lexicon <- function(text) {
 }
 ```
 
-
 ```{r}
 twitter_lexicon <- twitter_data |> 
   mutate(
@@ -128,12 +126,12 @@ twitter_lexicon <- twitter_data |>
 ```
 
 Save this as a csv
+
 ```{r}
 # write.csv(twitter_lexicon, "twitter_lexicon_and_transformer_clean.csv", row.names = FALSE)
 ```
 
-
-#### 1. Lexicon model: NRC
+#### 3.1. Lexicon model: NRC
 
 Lemmatize the text function
 
@@ -160,7 +158,9 @@ Download the Spanish model
 ud_model <- udpipe_load_model("spanish-gsd-ud-2.5-191206.udpipe")
 ```
 
-Apply lemmatisation to the text (clean_lexicon_text) REVISE
+REVISE LEMMATISATION ----------------------------------------------------
+
+Apply lemmatisation to the text (clean_lexicon_text)
 
 ```{r}
 # twitter_lexicon <- twitter_lexicon |> 
@@ -173,8 +173,9 @@ After it has been run once, save to use for other models
 #write.csv(twitter_lexicon, "twitter_lexicon_lemmatized.csv", row.names = FALSE)
 ```
 
+END OF LEMMATISATION -----------------------------------------------------
 
-Run NRC 
+Run NRC
 
 ```{r}
 nrc_results <- get_nrc_sentiment(twitter_lexicon$clean_lexicon_text, language = "spanish")
@@ -188,11 +189,72 @@ nrc_results <- bind_cols(
 )
 ```
 
-Save the results of NRC 
+Save the results of NRC
 
 ```{r}
 write.csv(nrc_results, "NRC_results.csv", row.names = FALSE)
 ```
 
+#### 3.2. Lexicon model: SEL
 
-#### 2. Lexicon model: SEL
+### 4. Trasformer-based model: RoBERTuito
+
+#### 4.1 Open clean data
+
+```{r}
+clean_data <- read.csv("twitter_lexicon_and_transformer_clean.csv", colClasses = c(id = "character"))
+```
+
+#### 4.2 Install prerequisites
+
+```{r}
+#install.packages("reticulate")
+library(reticulate)
+
+# Install Python dependencies:
+# py_install(c("transformers", "torch", "pysentimiento"), pip = TRUE)
+```
+
+```{r}
+pysentimiento <- import("pysentimiento")
+```
+
+#### 4.3 Create analyzer for sentiment
+
+```{r}
+analyzer <- pysentimiento$create_analyzer(task = "sentiment", lang = "es")
+```
+
+#### 4.4 Apply to data
+
+```{r}
+results <- lapply(clean_data$text_clean, function(x) {
+  pred <- analyzer$predict(x)
+  data.frame(
+    label = pred$output,
+    POS   = pred$probas[["POS"]],
+    NEG   = pred$probas[["NEG"]],
+    NEU   = pred$probas[["NEU"]]
+  )
+})
+```
+
+#### 4.5 Create 1 single dataframe:
+
+```{r}
+results_df <- do.call(rbind, results)
+```
+
+#### 4.6 join results to original dataframe
+
+Only include id, political_party and tweet from "clean_data" and bind with the results from RoBERTuito
+
+```{r}
+robertuito_results <- cbind(clean_data[, c("id", "political_party", "tweet")], results_df)
+```
+
+#### 4.7 Save results
+
+```{r}
+write.csv(robertuito_results, "RoBERTuito_results.csv", row.names = FALSE)
+```
