@@ -53,9 +53,9 @@ twitter_transformer <- twitter_data |>
 
 ### 3. Lexicon-based models
 
-#### CSV emoji mapping in Spanish
+#### 3.1 Emoji mapping in Spanish
 
-Load the Spanish emoji mapping (Emoji-SP).
+##### Load the Spanish emoji mapping (Emoji-SP).
 
 ```{r}
 emoji_map <- read_excel("emoji_mapping_es.xlsx") |> 
@@ -63,7 +63,7 @@ emoji_map <- read_excel("emoji_mapping_es.xlsx") |>
   select(emoji, definition_lower, val)
 ```
 
-#### Function replace emojis with text using Emoji-SP
+##### Function replace emojis with text using Emoji-SP
 
 ```{r}
 # This replaces the emoji symbol with the Spanish definition from Emoji-SP file
@@ -80,14 +80,14 @@ replace_emoji_with_def <- function(text, lexicon) {
 }
 ```
 
-Create a new column with emoji replaced text called emoji_text
+##### Create a new column with emoji replaced text called emoji_text
 
 ```{r}
 twitter_lexicon <- twitter_transformer %>%
   mutate(emoji_text = sapply(text_clean, replace_emoji_with_def, lexicon = emoji_map))
 ```
 
-#### Lexicon-specific cleaning pipeline
+#### 3.2 Lexicon-specific cleaning pipeline
 
 clean data (specifically column emoji_text): drop hashtags symbols, remove punctuation and make everything lowercase.
 
@@ -131,7 +131,7 @@ Save this as a csv
 # write.csv(twitter_lexicon, "twitter_lexicon_and_transformer_clean.csv", row.names = FALSE)
 ```
 
-#### 3.1. Lexicon model: NRC
+#### 3.3. Lexicon model: NRC
 
 Lemmatize the text function
 
@@ -195,7 +195,7 @@ Save the results of NRC
 write.csv(nrc_results, "NRC_results.csv", row.names = FALSE)
 ```
 
-#### 3.2. Lexicon model: SEL
+#### 3.4 Lexicon model: SEL
 
 ### 4. Trasformer-based model: RoBERTuito
 
