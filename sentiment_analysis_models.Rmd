@@ -51,7 +51,7 @@ twitter_transformer <- twitter_data |>
   mutate(text_clean = map_chr(tweet, clean_general))
 ```
 
-### 3. Lexicon-based models
+### 3. Lexicon-based model
 
 #### 3.1 Emoji mapping in Spanish
 
@@ -175,7 +175,7 @@ After it has been run once, save to use for other models
 
 END OF LEMMATISATION -----------------------------------------------------
 
-Run NRC
+##### Run NRC
 
 ```{r}
 nrc_results <- get_nrc_sentiment(twitter_lexicon$clean_lexicon_text, language = "spanish")
@@ -184,18 +184,16 @@ nrc_results <- get_nrc_sentiment(twitter_lexicon$clean_lexicon_text, language = 
 ```{r}
 # Bind the id and tweet columns from twitter_lexicon to the NRC results
 nrc_results <- bind_cols(
-  twitter_lexicon |> select(id, tweet),
+  twitter_lexicon |> select(id, political_party, tweet),
   nrc_results
 )
 ```
 
-Save the results of NRC
+##### Save the results of NRC
 
 ```{r}
 write.csv(nrc_results, "NRC_results.csv", row.names = FALSE)
 ```
-
-#### 3.4 Lexicon model: SEL
 
 ### 4. Trasformer-based model: RoBERTuito
 
@@ -258,3 +256,412 @@ robertuito_results <- cbind(clean_data[, c("id", "political_party", "tweet")], r
 ```{r}
 write.csv(robertuito_results, "RoBERTuito_results.csv", row.names = FALSE)
 ```
+
+
+
+```{r}
+nrc_results <- read.csv("NRC_results.csv", colClasses = c(id = "character"))
+```
+
+```{r}
+
+## REVISEEEEEEEEEEE
+nrc_results <- nrc_results |>
+  mutate(political_party = clean_data$political_party) |>
+  select(id, political_party, everything())
+
+write.csv(nrc_results, "NRC_results.csv", row.names = FALSE)
+```
+
+### 5. LLM model: Gemini 
+
+Gemini 3.1 Flash Lite model for the analysis
+
+- Batching: Group data into batches of 10 to 20 rows and ask Gemini to return a structured JSON list of results.
+- Structured Output: Force Gemini to return only valid JSON
+- Rate Limit Buffering: Implement a small Sys.sleep() time delay between batches.
+
+#### 5.1 Setup
+
+```{r libraries}
+library(httr2)
+library(tidyverse)
+library(jsonlite)
+
+```
+
+#### 5.2 Prepare data 
+
+Read data and select only the columns needed
+
+```{r prepare-data}
+my_data <- read.csv("twitter_lexicon_and_transformer_clean.csv", colClasses = c(id = "character"))
+
+my_data <- my_data |> select(id, political_party, text_clean)
+
+# Normalise quotes to prevent JSON breaking
+my_data <- my_data %>%
+  mutate(text_clean = str_replace_all(text_clean, '[\u201C\u201D\u201E\u201F]', '"'),
+         text_clean = str_replace_all(text_clean, '"', "'"))
+
+# Define batch size (e.g., 20 rows per API call)
+batch_size <- 20
+my_data <- my_data %>% 
+  mutate(batch_id = ceiling(row_number() / batch_size))
+```
+
+#### 5.3 Analysis Loop
+
+```{r gemini-loop}
+
+API_KEY <- Sys.getenv("GEMINI_KEY") #API key is saved in .Renviron file as: GEMINI_API_KEY=your_key, call usethis::edit_r_environ() to open that file and save it.
+
+if (API_KEY == "") stop("GEMINI_KEY not found. Check your .Renviron file.")
+
+# Select model: gemini-2.5-flash-lite, which is designed for simple classification tasks (gemini-2.5-flash is much more expensive) 
+url <- paste0(
+  "https://generativelanguage.googleapis.com/v1beta/models/",
+  "gemini-2.5-flash-lite:generateContent?key=", API_KEY
+)
+
+# Initialise results storage and failure log
+results_list  <- list()
+failed_batches <- c()   # track failed batch IDs in memory
+total_batches  <- max(my_data$batch_id)
+
+for (i in 1:total_batches) {
+
+  # Skip this batch if it was already processed.
+  # This prevents silent duplicates if the loop is re-run after a crash.
+  if (as.character(i) %in% names(results_list)) {
+    message(sprintf("Batch %d already processed — skipping.", i))
+    next
+  }
+
+  current_batch <- my_data %>% filter(batch_id == i)
+
+  # jsonlite::toJSON handles all quote escaping internally — do not pre-escape.
+  batch_json_string <- jsonlite::toJSON(
+    current_batch %>% select(id, text_clean),
+    auto_unbox = TRUE
+  )
+
+  prompt <- paste0(
+    "You are a strict data processing tool. Do sentiment analysis on the ",
+    "text data provided in JSON format below following these instructions:\n\n",
+    "1. Sentiment Classification: In English, classify each tweet exactly as ",
+    "'positive', 'negative', or 'neutral' (choose only one label per tweet).\n",
+    "2. Explanation: Provide a concise and specific explanation for how you ",
+    "decided on that label.\n\n",
+    "CRITICAL: Return ONLY a valid JSON array of objects containing exactly ",
+    "three keys: 'id', 'sentiment', and 'explanation'. ",
+    "Do not include markdown formatting, markdown code blocks (like ```json), ",
+    "or any conversational filler.\n\n",
+    "Data:\n", batch_json_string
+  )
+
+  req <- request(url) %>%
+    req_body_json(list(
+      contents = list(
+        list(parts = list(list(text = prompt)))
+      ),
+      generationConfig = list(
+        temperature = 0.0   # Keep output deterministic for classification
+      )
+    )) %>%
+    req_retry(max_tries = 3)  # Automatically retries on HTTP 503
+
+  # Send request; catch network or HTTP errors
+  api_response <- tryCatch({
+    resp <- req_perform(req)
+    resp_body_json(resp)
+  }, error = function(e) {
+    message(sprintf("API error in batch %d: %s", i, e$message))
+    return(NULL)
+  })
+
+  # --- Handle the response ---
+  batch_success <- FALSE
+
+  if (!is.null(api_response)) {
+    raw_text <- api_response$candidates[[1]]$content$parts[[1]]$text
+
+    parsed_response <- tryCatch({
+      clean_text <- gsub("```json|```", "", raw_text)
+      clean_text <- trimws(clean_text)
+      jsonlite::fromJSON(clean_text)
+    }, error = function(e) {
+      message(sprintf("JSON parse error in batch %d — raw response was malformed.", i))
+      return(NULL)
+    })
+
+    if (!is.null(parsed_response)) {
+      results_list[[as.character(i)]] <- as_tibble(parsed_response)
+      batch_success <- TRUE
+    }
+  }
+
+  # FIX (Issue 3): If the batch failed at any point, log its ID immediately
+  # to a file so you have a record without having to scan for NAs afterwards.
+  if (!batch_success) {
+    failed_batches <- c(failed_batches, i)
+    write(
+      sprintf("FAILED batch %d at %s", i, Sys.time()),
+      file = "failed_batches.log",
+      append = TRUE
+    )
+  }
+
+  # Progress message every 10 batches
+  if (i %% 10 == 0) {
+    message(sprintf(
+      "Processed batch %d of %d (%.1f%%) — %d failed so far",
+      i, total_batches, (i / total_batches) * 100, length(failed_batches)
+    ))
+  }
+
+  # FIX (Issue 4): Save a checkpoint every 15 batches instead of every 50.
+  # With ~1,480 batches, saving every 50 means up to 49 batches of lost work
+  # after a crash. Every 15 limits that loss to at most 14 batches.
+  if (i %% 15 == 0) {
+    saveRDS(results_list, "partial_results.rds")
+    message(sprintf("Checkpoint saved at batch %d.", i))
+  }
+
+  # FIX (Issue 5): Only sleep after a *successful* call.
+  # Sleeping after a failure wastes time and gains nothing.
+  if (batch_success) Sys.sleep(0.5)
+}
+
+# Final checkpoint save
+saveRDS(results_list, "partial_results.rds")
+
+# Summary of failures
+if (length(failed_batches) > 0) {
+  message(sprintf(
+    "Done. %d batch(es) failed: %s. See failed_batches.log for details.",
+    length(failed_batches), paste(failed_batches, collapse = ", ")
+  ))
+} else {
+  message("Done. All batches completed successfully.")
+}
+```
+
+#### 5.4 Combine and save results
+
+```{r save-results}
+# Combine all successful batch results into one data frame
+final_sentiments <- bind_rows(results_list) |> 
+  distinct(id, .keep_all = TRUE) #Avoid having duplicates in the results
+
+# Join back to the original data (tweets with no result will show NA)
+final_data <- my_data |>  left_join(final_sentiments, by = "id")
+
+write.csv(final_data, "Gemini_results.csv", row.names = FALSE)
+
+message(sprintf(
+  "Saved %d rows. Rows with missing sentiment (NA): %d",
+  nrow(final_data),
+  sum(is.na(final_data$sentiment))
+))
+```
+
+The output has produced the same number of rows but there are 1355 rows with missing data (NA). This is because some tweets included special characters (like quotation marks), which caused Gemini to generate invalid JSON that couldn't be read or processed.
+
+#### 5.5 Rerun the code on missing batches
+
+```{r retry-failed-batches}
+# ── RETRY CHUNK ──────────────────────────────────────────────────────────────
+# Runs only the 66 batches that failed in the main loop.
+# Safe to re-run multiple times — skips any batch already in results_list.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Load the checkpoint so we don't lose the 1,414 batches that succeeded
+results_list <- readRDS("partial_results.rds")
+
+# The 66 failed batch IDs from the log
+failed_batches <- c(22, 27, 34, 40, 90, 103, 107, 118, 119, 143, 147, 183,
+                    190, 210, 211, 215, 241, 270, 301, 306, 310, 378, 409,
+                    416, 488, 537, 679, 709, 724, 744, 747, 760, 766, 809,
+                    835, 866, 881, 887, 893, 915, 924, 925, 937, 963, 975,
+                    986, 993, 1000, 1022, 1064, 1071, 1082, 1147, 1179, 1192,
+                    1202, 1251, 1296, 1301, 1317, 1355, 1365, 1371, 1376,
+                    1436, 1454)
+
+still_failed <- c()
+
+for (i in failed_batches) {
+
+  # Skip if already recovered in a previous retry run
+  if (as.character(i) %in% names(results_list)) {
+    message(sprintf("Batch %d already recovered — skipping.", i))
+    next
+  }
+
+  current_batch <- my_data %>% filter(batch_id == i)
+
+  # Extra aggressive quote cleaning for problem batches:
+  # Replace ALL types of quotes and apostrophes with a simple apostrophe
+  current_batch <- current_batch %>%
+    mutate(text_clean = str_replace_all(text_clean, '[\u201C\u201D\u201E\u201F\u0022]', "'"),
+           text_clean = str_replace_all(text_clean, '[\u2018\u2019\u201A\u201B]', "'"),
+           text_clean = str_replace_all(text_clean, '\\\\', ' '))  # remove backslashes
+
+  batch_json_string <- jsonlite::toJSON(
+    current_batch %>% select(id, text_clean),
+    auto_unbox = TRUE
+  )
+
+  prompt <- paste0(
+    "You are a strict data processing tool. Do sentiment analysis on the ",
+    "text data provided in JSON format below following these instructions:\n\n",
+    "1. Sentiment Classification: In English, classify each tweet exactly as ",
+    "'positive', 'negative', or 'neutral' (choose only one label per tweet).\n",
+    "2. Explanation: Provide a concise and specific explanation for how you ",
+    "decided on that label.\n\n",
+    "CRITICAL: Return ONLY a valid JSON array of objects containing exactly ",
+    "three keys: 'id', 'sentiment', and 'explanation'. ",
+    "Do not include markdown formatting, markdown code blocks (like ```json), ",
+    "or any conversational filler.\n\n",
+    "Data:\n", batch_json_string
+  )
+
+  req <- request(url) %>%
+    req_body_json(list(
+      contents = list(
+        list(parts = list(list(text = prompt)))
+      ),
+      generationConfig = list(temperature = 0.0)
+    )) %>%
+    req_retry(max_tries = 3)
+
+  api_response <- tryCatch({
+    resp <- req_perform(req)
+    resp_body_json(resp)
+  }, error = function(e) {
+    message(sprintf("API error in batch %d: %s", i, e$message))
+    return(NULL)
+  })
+
+  batch_success <- FALSE
+
+  if (!is.null(api_response)) {
+    raw_text <- api_response$candidates[[1]]$content$parts[[1]]$text
+
+    parsed_response <- tryCatch({
+      clean_text <- gsub("```json|```", "", raw_text)
+      clean_text <- trimws(clean_text)
+      jsonlite::fromJSON(clean_text)
+    }, error = function(e) {
+      message(sprintf("Still failing — batch %d malformed again.", i))
+      return(NULL)
+    })
+
+    if (!is.null(parsed_response)) {
+      results_list[[as.character(i)]] <- as_tibble(parsed_response)
+      batch_success <- TRUE
+      message(sprintf("✓ Recovered batch %d", i))
+    }
+  }
+
+  if (!batch_success) {
+    still_failed <- c(still_failed, i)
+  }
+
+  if (batch_success) Sys.sleep(0.5)
+}
+
+# Save updated results
+saveRDS(results_list, "partial_results.rds")
+
+# Summary
+message(sprintf("\nRetry complete. Recovered %d of %d failed batches.",
+                length(failed_batches) - length(still_failed), length(failed_batches)))
+if (length(still_failed) > 0) {
+  message(sprintf("Still failing after retry: %s", paste(still_failed, collapse = ", ")))
+} else {
+  message("All previously failed batches recovered successfully!")
+}
+```
+
+After retrying the code I have recovered 4 of 66 failed batches only. Those batches have tweets so heavily corrupted with special characters that even the aggressive cleaning is not enough.
+
+### 6.Standarisation
+
+#### 6.1 NRC
+
+```{r}
+nrc_results <- read.csv("NRC_results.csv", colClasses = c(id = "character"))
+```
+
+##### Function to select one single label
+
+```{r}
+choose_label <- function(data) {
+  if(data$negative > data$positive) {
+    label <- "negative"
+  } else if (data$positive > data$negative) {
+    label <- "positive"
+  } else {
+    label <- "neutral" # create an extra label, if negative = positive then it is neutral
+  }
+  return(label)
+}
+```
+
+##### Run the function on the database
+
+```{r}
+nrc_results$nrc_lexicon <- sapply(1:nrow(nrc_results), function(i) choose_label(nrc_results[i, ]))
+```
+
+##### Save the new dataframe 
+
+Substitute the old csv with new one, where only a new column is added ("nrc_lexicon")
+
+```{r}
+write.csv(nrc_results, "NRC_results.csv", row.names = FALSE)
+```
+
+#### 6.2 RoBERTuito
+
+```{r}
+robertuito_results <- read.csv("RoBERTuito_results.csv", colClasses = c(id = "character"))
+```
+
+##### Change labels
+
+The RoBERTuito model outputs three labels: POS, NEG and NEU. In order to make a comparison between models the labels should be standarised.
+
+```{r}
+robertuito_results <- robertuito_results |> 
+  mutate(robertuito_transformer = case_when(
+    label == "POS" ~ "positive",
+    label == "NEG" ~ "negative",
+    label == "NEU" ~ "neutral"
+  ))
+```
+
+##### save the results
+
+```{r}
+write.csv(robertuito_results, "RoBERTuito_results.csv", row.names = FALSE)
+```
+
+
+### 7. Join results into one table
+
+### 8. Krippendorff's Alpha 
+
+first we need to pivot the table, each row is a model and column a tweet
+
+install.packages("irr")
+library(irr)
+
+then you would do something like this:
+```{r}
+#alpha_nominal <- kripp.alpha(model_matrix, method = "nominal")
+#print(alpha_nominal)
+```
+
+

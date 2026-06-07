@@ -1,0 +1,226 @@
+### 5. LLM model: Gemini — ⚠️ TEST VERSION (2 batches only)
+
+This is a **test run** to check that the API call works, measure how long
+one batch takes, and estimate the cost before running on the full dataset.
+
+It runs **only 2 batches (= 40 tweets)** and prints a cost estimate at the end.
+
+---
+
+#### 5.1 Setup
+
+```{r libraries}
+library(httr2)
+library(tidyverse)
+library(jsonlite)
+```
+
+---
+
+#### 5.2 Prepare data
+
+```{r prepare-data-test}
+my_data <- read.csv(
+  "twitter_lexicon_and_transformer_clean.csv",
+  colClasses = c(id = "character")
+)
+
+my_data <- my_data |> select(id, political_party, text_clean)
+
+# Define batch size and assign a batch_id to every row
+batch_size <- 20
+my_data <- my_data %>%
+  mutate(batch_id = ceiling(row_number() / batch_size))
+
+total_batches_full <- max(my_data$batch_id)
+message(sprintf("Full dataset has %d batches (%d tweets).", total_batches_full, nrow(my_data)))
+```
+
+---
+
+#### 5.3 Test loop — 2 batches only
+
+```{r gemini-test-loop}
+# --- API KEY ---
+# Make sure GEMINI_API_KEY is in your .Renviron file.
+# Run usethis::edit_r_environ() to open it and add:
+#   GEMINI_API_KEY=your_actual_key_here
+# Then restart R.
+API_KEY <- Sys.getenv("GEMINI_KEY")
+if (API_KEY == "") stop("GEMINI_KEY not found. Check your .Renviron file.")
+
+# --- MODEL ---
+# Using gemini-2.0-flash-lite: cheap, fast, designed for simple classification. 
+# IMPORTANT: check model if it is outdated
+url <- paste0(
+  "https://generativelanguage.googleapis.com/v1beta/models/",
+  "gemini-2.5-flash-lite:generateContent?key=", API_KEY
+)
+
+# ============================================================
+# TEST SETTING: only run batches 1 and 2 (= 40 tweets total).
+# Change this to 1:total_batches_full when running for real.
+# ============================================================
+TEST_BATCHES <- 1:2   # <--- CHANGE THIS LINE TO 1:total_batches_full FOR THE FULL RUN
+
+results_list   <- list()
+failed_batches <- c()
+token_log      <- list()   # stores token usage per batch for cost estimation
+
+# Record start time to measure total elapsed time
+test_start_time <- Sys.time()
+
+for (i in TEST_BATCHES) {
+
+  # Skip if already processed (safety guard against re-running)
+  if (as.character(i) %in% names(results_list)) {
+    message(sprintf("Batch %d already processed — skipping.", i))
+    next
+  }
+
+  current_batch <- my_data %>% filter(batch_id == i)
+
+  # toJSON handles all escaping — do NOT manually escape quotes before this
+  batch_json_string <- jsonlite::toJSON(
+    current_batch %>% select(id, text_clean),
+    auto_unbox = TRUE
+  )
+
+  prompt <- paste0(
+    "You are a strict data processing tool. Do sentiment analysis on the ",
+    "text data provided in JSON format below following these instructions:\n\n",
+    "1. Sentiment Classification: In English, classify each tweet exactly as ",
+    "'positive', 'negative', or 'neutral' (choose only one label per tweet).\n",
+    "2. Explanation: Provide a concise and specific explanation for how you ",
+    "decided on that label.\n\n",
+    "CRITICAL: Return ONLY a valid JSON array of objects containing exactly ",
+    "three keys: 'id', 'sentiment', and 'explanation'. ",
+    "Do not include markdown formatting, markdown code blocks (like ```json), ",
+    "or any conversational filler.\n\n",
+    "Data:\n", batch_json_string
+  )
+
+  req <- request(url) %>%
+    req_body_json(list(
+      contents = list(
+        list(parts = list(list(text = prompt)))
+      ),
+      generationConfig = list(
+        temperature = 0.0
+      )
+    )) %>%
+    req_retry(max_tries = 3)
+
+  # Time each individual batch call
+  batch_start <- Sys.time()
+
+  api_response <- tryCatch({
+    resp <- req_perform(req)
+    resp_body_json(resp)
+  }, error = function(e) {
+    message(sprintf("API error in batch %d: %s", i, e$message))
+    return(NULL)
+  })
+
+  batch_elapsed <- as.numeric(Sys.time() - batch_start, units = "secs")
+
+  batch_success <- FALSE
+
+  if (!is.null(api_response)) {
+
+    # --- Extract token usage from the API response ---
+    # Google returns token counts in usageMetadata — log them for cost estimate
+    usage <- api_response$usageMetadata
+    input_tokens  <- usage$promptTokenCount
+    output_tokens <- usage$candidatesTokenCount
+    token_log[[as.character(i)]] <- list(
+      input  = input_tokens,
+      output = output_tokens
+    )
+    message(sprintf(
+      "Batch %d — %.1f sec | input tokens: %d | output tokens: %d",
+      i, batch_elapsed, input_tokens, output_tokens
+    ))
+
+    raw_text <- api_response$candidates[[1]]$content$parts[[1]]$text
+
+    parsed_response <- tryCatch({
+      clean_text <- gsub("```json|```", "", raw_text)
+      clean_text <- trimws(clean_text)
+      jsonlite::fromJSON(clean_text)
+    }, error = function(e) {
+      message(sprintf("JSON parse error in batch %d — raw response was malformed.", i))
+      return(NULL)
+    })
+
+    if (!is.null(parsed_response)) {
+      results_list[[as.character(i)]] <- as_tibble(parsed_response)
+      batch_success <- TRUE
+    }
+  } else {
+    # Log failure
+    failed_batches <- c(failed_batches, i)
+    message(sprintf("Batch %d FAILED.", i))
+  }
+
+  # Only sleep between successful calls, not after failures
+  if (batch_success) Sys.sleep(0.5)
+}
+
+# -------------------------------------------------------
+# SUMMARY: time + cost estimate for the full dataset
+# -------------------------------------------------------
+test_elapsed <- as.numeric(Sys.time() - test_start_time, units = "secs")
+n_test       <- length(TEST_BATCHES)
+total_batches_full <- max(my_data$batch_id)
+
+# Average tokens per batch from the test
+avg_input  <- mean(sapply(token_log, `[[`, "input"))
+avg_output <- mean(sapply(token_log, `[[`, "output"))
+
+# gemini-2.0-flash-lite pricing (as of 2025):
+#   Input:  $0.015 per 1 million tokens
+#   Output: $0.060 per 1 million tokens
+price_input_per_million  <- 0.015
+price_output_per_million <- 0.060
+
+total_input_tokens  <- avg_input  * total_batches_full
+total_output_tokens <- avg_output * total_batches_full
+
+cost_input  <- (total_input_tokens  / 1e6) * price_input_per_million
+cost_output <- (total_output_tokens / 1e6) * price_output_per_million
+cost_total_usd <- cost_input + cost_output
+cost_total_eur <- cost_total_usd * 0.92  # approximate USD -> EUR
+
+# Estimated time for full run (seconds per batch * total batches)
+avg_secs_per_batch    <- test_elapsed / n_test
+est_total_secs        <- avg_secs_per_batch * total_batches_full
+est_total_mins        <- est_total_secs / 60
+
+message("\n========== TEST RESULTS ==========")
+message(sprintf("Test batches run:         %d", n_test))
+message(sprintf("Tweets processed:         %d", n_test * batch_size))
+message(sprintf("Time for test:            %.1f seconds", test_elapsed))
+message(sprintf("Avg time per batch:       %.1f seconds", avg_secs_per_batch))
+message(sprintf("Avg input tokens/batch:   %.0f", avg_input))
+message(sprintf("Avg output tokens/batch:  %.0f", avg_output))
+message("-----------------------------------")
+message(sprintf("FULL dataset batches:     %d", total_batches_full))
+message(sprintf("Estimated total time:     %.0f minutes", est_total_mins))
+message(sprintf("Estimated total cost:     $%.4f USD (~€%.4f EUR)", cost_total_usd, cost_total_eur))
+message("===================================")
+
+if (length(failed_batches) > 0) {
+  message(sprintf("WARNING: %d batch(es) failed: %s", length(failed_batches), paste(failed_batches, collapse = ", ")))
+}
+```
+
+---
+
+#### 5.4 Inspect test results
+
+```{r inspect-test-results}
+# Check that the results look correct before running the full dataset
+test_results <- bind_rows(results_list)
+print(test_results)
+```
