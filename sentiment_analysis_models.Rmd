@@ -466,9 +466,9 @@ message(sprintf(
 ))
 ```
 
-The output has produced the same number of rows but there are 1355 rows with missing data (NA). This is because some tweets included special characters (like quotation marks), which caused Gemini to generate invalid JSON that couldn't be read or processed.
+The output has produced the same number of rows but there are 1355 rows with missing data (NA). This is because some tweets included special characters (like quotation marks), which caused Gemini to generate invalid JSON that could not be read or processed.
 
-#### 5.5 Rerun the code on missing batches
+#### 5.5 Re-run the code on missing batches
 
 ```{r retry-failed-batches}
 # ── RETRY CHUNK ──────────────────────────────────────────────────────────────
@@ -586,7 +586,31 @@ if (length(still_failed) > 0) {
 
 After retrying the code I have recovered 4 of 66 failed batches only. Those batches have tweets so heavily corrupted with special characters that even the aggressive cleaning is not enough.
 
+##### Save results
+
+```{r rebuild-final-csv}
+
+results_list <- readRDS("partial_results.rds")
+
+# Rebuild the final CSV with the recovered batches included
+final_sentiments <- bind_rows(results_list)
+
+final_data <- my_data %>%
+  left_join(final_sentiments, by = "id") %>%
+  distinct(id, .keep_all = TRUE)  # remove duplicate rows
+
+write.csv(final_data, "Gemini_results.csv", row.names = FALSE)
+
+message(sprintf(
+  "Saved %d rows. Rows with missing sentiment (NA): %d",
+  nrow(final_data),
+  sum(is.na(final_data$sentiment))
+))
+```
+
 ### 6.Standarisation
+
+The standarisation process requieres that the data is numeric. Since there are NA's in the Gemini results, numeric matrices handle NA seamlessly for calculating Krippendorff's Alpha
 
 #### 6.1 NRC
 
@@ -648,20 +672,172 @@ robertuito_results <- robertuito_results |>
 write.csv(robertuito_results, "RoBERTuito_results.csv", row.names = FALSE)
 ```
 
+#### 6.3 Gemini
 
-### 7. Join results into one table
+Load the Gemini results
+
+```{r read Gemini results}
+gemini_results <- read.csv("Gemini_results.csv", colClasses = c(id = "character"))
+```
+
+```{r add gemini llm column}
+gemini_results <- gemini_results |> select(-text_clean.y) |> 
+  mutate(gemini_llm = sentiment)
+```
+
+```{r}
+write.csv(gemini_results, "Gemini_results.csv", row.names = FALSE)
+```
+
+### 7. Global analysis
+
+#### 7.1 Join dataframes 
+
+The data will be joined by id, producing a new data frame with the results for each model.
+
+```{r combine results}
+combined_results <- list(
+  nrc_results |> select(id, nrc_lexicon),
+  robertuito_results |> select(id, robertuito_transformer),
+  gemini_results |> select(id, gemini_llm)) |> 
+  reduce(full_join, by = "id")
+```
+
+#### 7.2 Visualise results
+
+```{r}
+combined_results |>  
+  pivot_longer(cols = c(nrc_lexicon, robertuito_transformer, gemini_llm),
+                                  names_to = "model",
+                                  values_to = "sentiment") |> 
+   mutate(model = recode(model,
+                        "nrc_lexicon" = "NRC",
+                        "robertuito_transformer" = "RoBERTuito",
+                        "gemini_llm" = "Gemini"),
+          sentiment = factor(sentiment, levels = c("negative", "neutral", "positive", NA))) |> 
+  count(model, sentiment) |> 
+  group_by(model) |>
+  mutate(pct = round(n / sum(n) * 100, 1)) |>
+  ungroup() |>
+  complete(model, sentiment, fill = list(n = 0, pct = 0)) |>
+  ggplot(aes(x = sentiment, y = pct, fill = sentiment)) + 
+  geom_col() +
+  geom_text(data = . %>% filter(is.na(sentiment)),   # label all NA bars
+            aes(label = paste0(pct, "%")), 
+            y = 1.5, size = 3, color = "gray40") +
+  facet_wrap(~ model) +
+  scale_fill_manual(values = c("positive" = "#2ecc71",
+                               "negative" = "#e74c3c",
+                               "neutral" = "#3498db",
+                               "NA" = "gray")) +
+  labs(title = "Sentiment distribution by model",
+       x = "Sentiment", y = "Percentage") +
+  scale_y_continuous(limits = c(0, 60),
+                     breaks = seq(0, 60, by = 20),
+                     labels = paste0(seq(0, 60, by = 20), "%")) +
+  theme_minimal() +
+  theme(panel.grid = element_blank(),
+        strip.text = element_text(size = 12),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_line(color = "black", linewidth = 0.5),
+        axis.ticks.length = unit(0.2, "cm"),
+        strip.background = element_blank())
+```
+
+chisquared for difference between pos and netrsl compared to other model
+chi squared by pairs of sentiment, only report the ones that are significantz
+
+#### REVISEEEEEE: SAVE IMAGE 
 
 ### 8. Krippendorff's Alpha 
 
-first we need to pivot the table, each row is a model and column a tweet
+#### 8.1 Libraries
 
-install.packages("irr")
+```{r library Krippendorff's Alpha}
 library(irr)
+```
 
-then you would do something like this:
+#### 8.2 Global Agreement Analysis
+
 ```{r}
-#alpha_nominal <- kripp.alpha(model_matrix, method = "nominal")
-#print(alpha_nominal)
+kripp_matrix <- combined_results |> 
+  select(nrc_lexicon, robertuito_transformer, gemini_llm) |> 
+  #converts the text labels to numbers
+  mutate(across(everything(), ~ as.numeric(factor(., 
+                                                   levels = c("negative", "neutral", "positive"))))) |> 
+  t() #transposes so rows = raters (models) and columns = tweets
+
+krippendorff <- kripp.alpha(kripp_matrix, method = "nominal")
+print(krippendorff)
+```
+The Krippendorff's Alpha is 0.2, meaning that there is poor agreement between the models. Each model produces a different outcome and they very unlikely give the same result for the same tweet.
+
+#### 8.3 by party agreement analysis
+
+##### Select political_party
+
+```{r}
+party_combined_results <- list(
+  nrc_results |> select(id, political_party, nrc_lexicon),
+  robertuito_results |> select(id, robertuito_transformer),
+  gemini_results |> select(id, gemini_llm)
+) |> 
+  reduce(full_join, by = "id")
+```
+
+##### visualise results by party
+
+```{r}
+party_combined_results |>  
+  pivot_longer(cols = c(nrc_lexicon, robertuito_transformer, gemini_llm),
+               names_to = "model",
+               values_to = "sentiment") |> 
+  mutate(model = recode(model,
+                        "nrc_lexicon" = "NRC",
+                        "robertuito_transformer" = "RoBERTuito",
+                        "gemini_llm" = "Gemini"),
+         sentiment = factor(sentiment, levels = c("negative", "neutral", "positive"))) |> 
+  count(political_party, model, sentiment) |> 
+  group_by(political_party, model) |>
+  mutate(pct = round(n / sum(n) * 100, 1)) |>
+  ungroup() |>
+  ggplot(aes(x = sentiment, y = pct, fill = sentiment)) + 
+  geom_col() +
+  facet_grid(political_party ~ model) +
+  scale_fill_manual(values = c("positive" = "#2ecc71",
+                               "negative" = "#e74c3c",
+                               "neutral" = "#3498db")) +
+  labs(title = "Sentiment distribution by model and party",
+       x = "Sentiment", y = "Percentage") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        panel.grid = element_blank(),
+        strip.text.x = element_text(size = 12),
+        strip.text.y = element_text(size = 10, angle = 0),
+        strip.background = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.border = element_blank())
+```
+
+
+##### Agreement analysis by party
+
+```{r}
+parties <- party_combined_results |> distinct(political_party) |> pull(political_party) 
+
+party_combined_results |> 
+  group_by(political_party) |> 
+  group_map(~ { # group_map runs automatically for each party without repeating the code manually
+    mat <- .x |> 
+      select(nrc_lexicon, robertuito_transformer, gemini_llm) |> 
+      mutate(across(everything(), ~ as.numeric(factor(., 
+                                                      levels = c("negative", "neutral", "positive"))))) |> 
+      t()
+    kripp.alpha(mat, method = "nominal")
+  }) |> 
+  setNames(parties)
 ```
 
 
