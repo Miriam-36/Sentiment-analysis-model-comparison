@@ -689,155 +689,454 @@ gemini_results <- gemini_results |> select(-text_clean.y) |>
 write.csv(gemini_results, "Gemini_results.csv", row.names = FALSE)
 ```
 
-### 7. Global analysis
-
-#### 7.1 Join dataframes 
+### 7. Join dataframes 
 
 The data will be joined by id, producing a new data frame with the results for each model.
 
 ```{r combine results}
 combined_results <- list(
-  nrc_results |> select(id, nrc_lexicon),
+  nrc_results |> select(id, political_party, tweet, nrc_lexicon),
   robertuito_results |> select(id, robertuito_transformer),
   gemini_results |> select(id, gemini_llm)) |> 
   reduce(full_join, by = "id")
 ```
 
-#### 7.2 Visualise results
+```{r}
+write.csv(combined_results, "models_combined_results.csv", row.names = FALSE)
+```
+
+### 8. Krippendorff's Alpha 
+
+#### 8.1 Libraries
+
+```{r libraries}
+library(irr) # library Krippendorff's Alpha
+library(gt) # to create tables
+library(purrr)
+```
+
+#### 8.2 Load data and shared factor definitions
+
+```{r load combined results}
+combined_results <- read.csv("models_combined_results.csv", colClasses = c(id = "character"))
+```
+
+```{r models and party labels}
+# ── Model recoding ──────────────────────────────────────────────────────────
+model_labels <- c(
+  "nrc_lexicon"            = "NRC",
+  "robertuito_transformer" = "RoBERTuito",
+  "gemini_llm"             = "Gemini"
+)
+model_levels <- c("NRC", "Gemini", "RoBERTuito")   # left-to-right display order
+
+# ── Party recoding (full names, used in most outputs) ────────────────────────
+party_labels_full <- c(
+  "esquerra republicana" = "Esquerra Republicana de Catalunya (ERC)",
+  "podemos"              = "Podemos",
+  "psoe"                 = "PSOE",
+  "ciudadanos"           = "Ciudadanos",
+  "partido popular"      = "Partido Popular (PP)",
+  "vox"                  = "Vox"
+)
+# Ideological left-to-right ordering (full names)
+party_levels_full <- c(
+  "Esquerra Republicana de Catalunya (ERC)", "Podemos", "PSOE",
+  "Ciudadanos", "Partido Popular (PP)", "Vox"
+)
+
+# ── Party recoding (abbreviated names, used in the heatmap) ─────────────────
+party_labels_abbr <- c(
+  "esquerra republicana" = "ERC",
+  "podemos"              = "Podemos",
+  "psoe"                 = "PSOE",
+  "ciudadanos"           = "Ciudadanos",
+  "partido popular"      = "PP",
+  "vox"                  = "Vox"
+)
+party_levels_abbr <- c("ERC", "Podemos", "PSOE", "Ciudadanos", "PP", "Vox")
+
+# ── Sentiment levels ─────────────────────────────────────────────────────────
+sentiment_levels <- c("negative", "neutral", "positive")
+
+# ── Shared colour palette ────────────────────────────────────────────────────
+sentiment_colours <- c(
+  "positive" = "#2ecc71",
+  "negative" = "#e74c3c",
+  "neutral"  = "#3498db"
+)
+
+# ── Helper: convert a character model column to ordered numeric (for kripp.alpha)
+to_numeric_sentiment <- function(x) {
+  as.numeric(factor(x, levels = sentiment_levels))
+}
+
+# ── Helper: compute Krippendorff's alpha for two model columns ───────────────
+calc_kripp_pair <- function(data, model1, model2) {
+  pair_matrix <- data |>
+    select(all_of(c(model1, model2))) |>
+    mutate(across(everything(), to_numeric_sentiment)) |>
+    t()
+  kripp.alpha(pair_matrix, method = "nominal")
+}
+
+# ── Model pairs used in both global and party-level analyses ─────────────────
+pairs <- list(
+  c("nrc_lexicon", "robertuito_transformer"),
+  c("nrc_lexicon", "gemini_llm"),
+  c("robertuito_transformer", "gemini_llm")
+)
+
+```
+
+#### 8.3 Global Agreement Analysis
+
+##### Krippendorff's Alpha (all three models)
+
+```{r global-kripp-alpha}
+# CHANGED: uses to_numeric_sentiment() helper defined above instead of
+# repeating the inline factor() call
+kripp_matrix <- combined_results |>
+  select(nrc_lexicon, robertuito_transformer, gemini_llm) |>
+  mutate(across(everything(), to_numeric_sentiment)) |>
+  t()
+
+krippendorff <- kripp.alpha(kripp_matrix, method = "nominal")
+print(krippendorff)
+```
+
+```{r global-kripp-table}
+# CHANGED: references model_labels for display names instead of hard-coding
+kripp_table <- tibble(
+  models = paste(model_labels, collapse = ", "),
+  alpha  = krippendorff$value
+) |>
+  gt() |>
+  fmt_number(columns = alpha, decimals = 3) |>
+  tab_header(title = "Global Krippendorff's Alpha") |>
+  cols_label(models = "Models", alpha = "α") |>
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_column_labels())
+
+kripp_table
+```
 
 ```{r}
-combined_results |>  
+gtsave(kripp_table, "kripp_table.png")
+```
+
+The Krippendorff's Alpha is 0.2, indicating poor agreement between the models.
+Each model produces a different outcome and they very rarely agree on the same
+tweet.
+
+##### Krippendorff's Alpha by pairs of models
+
+The single alpha above summarises all three models. Computing pairwise alphas
+reveals which specific pair diverges most.
+
+```{r global-kripp-pairs}
+# CHANGED: uses model_labels for recode; no repetition of label strings
+kripp_pairs <- map_dfr(pairs, function(pair) {
+  result <- calc_kripp_pair(combined_results, pair[1], pair[2])
+  tibble(model_1 = pair[1], model_2 = pair[2], alpha = result$value)
+})
+
+kripp_pairs_table <- kripp_pairs |>
+  mutate(
+    model_1 = recode(model_1, !!!model_labels),   # CHANGED: !!! splices model_labels
+    model_2 = recode(model_2, !!!model_labels)
+  ) |>
+  gt() |>
+  tab_header(
+    title    = "Krippendorff's Alpha by Model Pair",
+    subtitle = "Nominal scale — pairwise inter-rater agreement"
+  ) |>
+  cols_label(model_1 = "Model 1", model_2 = "Model 2", alpha = "α") |>
+  fmt_number(columns = alpha, decimals = 3) |>
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_column_labels()) |>
+  tab_spanner(label = "Model Pair", columns = c(model_1, model_2))
+
+kripp_pairs_table
+```
+
+```{r}
+gtsave(kripp_pairs_table, "kripp_pairs_table.png")
+```
+
+##### Visualisation: overall sentiment distribution by model
+
+```{r global-sentiment-distribution}
+# CHANGED: uses model_labels, model_levels, sentiment_colours defined above
+combined_results |>
   pivot_longer(cols = c(nrc_lexicon, robertuito_transformer, gemini_llm),
-                                  names_to = "model",
-                                  values_to = "sentiment") |> 
-   mutate(model = recode(model,
-                        "nrc_lexicon" = "NRC",
-                        "robertuito_transformer" = "RoBERTuito",
-                        "gemini_llm" = "Gemini"),
-          sentiment = factor(sentiment, levels = c("negative", "neutral", "positive", NA))) |> 
-  count(model, sentiment) |> 
+               names_to  = "model",
+               values_to = "sentiment") |>
+  mutate(
+    model     = factor(recode(model, !!!model_labels), levels = model_levels),
+    sentiment = factor(sentiment, levels = c(sentiment_levels, NA))
+  ) |>
+  count(model, sentiment) |>
   group_by(model) |>
   mutate(pct = round(n / sum(n) * 100, 1)) |>
   ungroup() |>
   complete(model, sentiment, fill = list(n = 0, pct = 0)) |>
-  ggplot(aes(x = sentiment, y = pct, fill = sentiment)) + 
+  ggplot(aes(x = sentiment, y = pct, fill = sentiment)) +
   geom_col() +
-  geom_text(data = . %>% filter(is.na(sentiment)),   # label all NA bars
-            aes(label = paste0(pct, "%")), 
-            y = 1.5, size = 3, color = "gray40") +
+  geom_text(aes(label = paste0(pct, "%")),
+            vjust = -0.4, size = 3, color = "gray30") +
   facet_wrap(~ model) +
-  scale_fill_manual(values = c("positive" = "#2ecc71",
-                               "negative" = "#e74c3c",
-                               "neutral" = "#3498db",
-                               "NA" = "gray")) +
+  scale_fill_manual(values = c(sentiment_colours, "NA" = "gray")) +
   labs(title = "Sentiment distribution by model",
        x = "Sentiment", y = "Percentage") +
   scale_y_continuous(limits = c(0, 60),
                      breaks = seq(0, 60, by = 20),
                      labels = paste0(seq(0, 60, by = 20), "%")) +
   theme_minimal() +
-  theme(panel.grid = element_blank(),
-        strip.text = element_text(size = 12),
-        axis.text.x = element_blank(),
-        axis.ticks.x = element_blank(),
-        axis.ticks.y = element_line(color = "black", linewidth = 0.5),
+  theme(panel.grid      = element_blank(),
+        strip.text      = element_text(size = 12),
+        axis.text.x     = element_blank(),
+        axis.ticks.x    = element_blank(),
+        axis.ticks.y    = element_line(color = "black", linewidth = 0.5),
         axis.ticks.length = unit(0.2, "cm"),
         strip.background = element_blank())
 ```
 
-chisquared for difference between pos and netrsl compared to other model
-chi squared by pairs of sentiment, only report the ones that are significantz
-
-#### REVISEEEEEE: SAVE IMAGE 
-
-### 8. Krippendorff's Alpha 
-
-#### 8.1 Libraries
-
-```{r library Krippendorff's Alpha}
-library(irr)
+```{r}
+ggsave("Models_sentiment_distribution.png", width = 8, height = 5, dpi = 300)
 ```
 
-#### 8.2 Global Agreement Analysis
+---
 
-```{r}
-kripp_matrix <- combined_results |> 
-  select(nrc_lexicon, robertuito_transformer, gemini_llm) |> 
-  #converts the text labels to numbers
-  mutate(across(everything(), ~ as.numeric(factor(., 
-                                                   levels = c("negative", "neutral", "positive"))))) |> 
-  t() #transposes so rows = raters (models) and columns = tweets
+#### 8.4 Party-level Agreement Analysis
 
-krippendorff <- kripp.alpha(kripp_matrix, method = "nominal")
-print(krippendorff)
+##### Krippendorff's Alpha by party
+
+```{r kripp-by-party}
+kripp_by_party <- combined_results |>
+  group_by(political_party) |>
+  group_map(.keep = TRUE, ~ {
+    mat <- .x |>
+      select(nrc_lexicon, robertuito_transformer, gemini_llm) |>
+      mutate(across(everything(), to_numeric_sentiment)) |>
+      t()
+    result <- kripp.alpha(mat, method = "nominal")
+    tibble(
+      political_party = .x$political_party[1],
+      subjects        = result$subjects,
+      raters          = result$raters,
+      alpha           = round(result$value, 3)
+    )
+  }) |>
+  bind_rows() |>
+  mutate(party = factor(recode(political_party, !!!party_labels_full),
+                        levels = party_levels_full))   # CHANGED: splices shared vectors
+
+party_kripp_table <- kripp_by_party |>
+  select(party, subjects, raters, alpha) |>
+  arrange(party) |>
+  gt() |>
+  cols_label(party    = "Party",
+             subjects = "Subjects",
+             raters   = "Raters",
+             alpha    = "Krippendorff's α") |>
+  tab_header(title = "Inter-model Agreement by Political Party") |>
+  fmt_number(columns = alpha, decimals = 3) |>
+  tab_style(style     = cell_text(weight = "bold"),
+            locations = cells_column_labels())
+
+party_kripp_table
 ```
-The Krippendorff's Alpha is 0.2, meaning that there is poor agreement between the models. Each model produces a different outcome and they very unlikely give the same result for the same tweet.
-
-#### 8.3 by party agreement analysis
-
-##### Select political_party
 
 ```{r}
-party_combined_results <- list(
-  nrc_results |> select(id, political_party, nrc_lexicon),
-  robertuito_results |> select(id, robertuito_transformer),
-  gemini_results |> select(id, gemini_llm)
-) |> 
-  reduce(full_join, by = "id")
+gtsave(party_kripp_table, "krippendorff_party_table.png")
 ```
 
-##### visualise results by party
+---
 
-```{r}
-party_combined_results |>  
-  pivot_longer(cols = c(nrc_lexicon, robertuito_transformer, gemini_llm),
-               names_to = "model",
-               values_to = "sentiment") |> 
-  mutate(model = recode(model,
-                        "nrc_lexicon" = "NRC",
-                        "robertuito_transformer" = "RoBERTuito",
-                        "gemini_llm" = "Gemini"),
-         sentiment = factor(sentiment, levels = c("negative", "neutral", "positive"))) |> 
-  count(political_party, model, sentiment) |> 
+##### Krippendorff's Alpha by party and model pair (heatmap)
+
+```{r kripp-pairs-by-party}
+# CHANGED: uses model_labels, party_labels_abbr, party_levels_abbr from §8.2
+kripp_pairs_party <- combined_results |>
+  group_by(political_party) |>
+  group_map(.keep = TRUE, ~ {
+    map_dfr(pairs, function(pair) {
+      result <- calc_kripp_pair(.x, pair[1], pair[2])
+      tibble(
+        political_party = .x$political_party[1],
+        model_1         = pair[1],
+        model_2         = pair[2],
+        alpha           = result$value
+      )
+    })
+  }) |>
+  bind_rows() |>
+  mutate(
+    pair = paste(recode(model_1, !!!model_labels),
+                 "vs",
+                 recode(model_2, !!!model_labels)),
+    political_party = factor(recode(political_party, !!!party_labels_abbr),
+                             levels = party_levels_abbr)
+  )
+
+ggplot(kripp_pairs_party,
+       aes(x = pair, y = political_party, fill = alpha)) +
+  geom_tile(color = "white", linewidth = 0.8) +
+  geom_text(aes(label = round(alpha, 2)), size = 3.5, fontface = "bold") +
+  scale_fill_gradient2(
+    low      = "#e74c3c",
+    mid      = "#f9e79f",
+    high     = "#2ecc71",
+    midpoint = median(kripp_pairs_party$alpha, na.rm = TRUE),
+    name     = "α"
+  ) +
+  labs(title = "Krippendorff's Alpha by Model Pair and Political Party",
+       x = "Model Pair", y = "Political Party") +
+  theme_minimal() +
+  theme(panel.grid  = element_blank(),
+        axis.text.x = element_text(angle = 20, hjust = 1))
+```
+
+---
+
+##### Visualisation: sentiment distribution by model and party
+
+```{r party-sentiment-distribution}
+# CHANGED: uses all shared factor objects; no repeated recode blocks
+combined_results |>
+  pivot_longer(cols      = c(nrc_lexicon, robertuito_transformer, gemini_llm),
+               names_to  = "model",
+               values_to = "sentiment") |>
+  filter(!is.na(sentiment)) |>
+  mutate(
+    political_party = factor(recode(political_party, !!!party_labels_full),
+                             levels = party_levels_full),
+    model           = factor(recode(model, !!!model_labels),
+                             levels = model_levels),
+    sentiment       = factor(sentiment, levels = sentiment_levels)
+  ) |>
+  count(political_party, model, sentiment) |>
   group_by(political_party, model) |>
   mutate(pct = round(n / sum(n) * 100, 1)) |>
   ungroup() |>
-  ggplot(aes(x = sentiment, y = pct, fill = sentiment)) + 
+  ggplot(aes(x = sentiment, y = pct, fill = sentiment)) +
   geom_col() +
   facet_grid(political_party ~ model) +
-  scale_fill_manual(values = c("positive" = "#2ecc71",
-                               "negative" = "#e74c3c",
-                               "neutral" = "#3498db")) +
+  scale_fill_manual(values = sentiment_colours) +
   labs(title = "Sentiment distribution by model and party",
        x = "Sentiment", y = "Percentage") +
   theme_minimal() +
-  theme(legend.position = "bottom",
-        panel.grid = element_blank(),
-        strip.text.x = element_text(size = 12),
-        strip.text.y = element_text(size = 10, angle = 0),
-        strip.background = element_blank(),
-        axis.text.x = element_blank(),
-        axis.ticks.x = element_blank(),
-        panel.border = element_blank())
+  theme(legend.position   = "bottom",
+        panel.grid        = element_blank(),
+        strip.text.x      = element_text(size = 11),
+        strip.text.y      = element_text(size = 10, angle = 0),
+        strip.background  = element_blank(),
+        axis.text.x       = element_blank(),
+        axis.ticks.x      = element_blank(),
+        panel.border      = element_blank())
 ```
 
+```{r}
+ggsave("Party_sentiment_distribution.png", width = 8, height = 5, dpi = 300)
+```
 
-##### Agreement analysis by party
+---
+
+##### Standard deviation of sentiment percentages across parties
+
+```{r sd-by-party}
+# CHANGED: uses model_labels and model_levels; no repeated recode
+sd_summary <- combined_results |>
+  pivot_longer(cols      = c(nrc_lexicon, robertuito_transformer, gemini_llm),
+               names_to  = "model",
+               values_to = "sentiment") |>
+  filter(!is.na(sentiment)) |>
+  mutate(model = factor(recode(model, !!!model_labels), levels = model_levels)) |>
+  count(political_party, model, sentiment) |>
+  group_by(political_party, model) |>
+  mutate(pct = n / sum(n) * 100) |>
+  ungroup() |>
+  group_by(model) |>
+  summarise(sd = round(sd(pct), 2))
+
+sd_summary_table <- sd_summary |>
+  gt() |>
+  tab_header(
+    title    = "Sentiment Variability Across Political Parties",
+    subtitle = "Standard deviation of sentiment percentages by model"
+  ) |>
+  cols_label(model = "Model", sd = "SD") |>
+  tab_options(table.width = pct(50))
+
+sd_summary_table
+```
 
 ```{r}
-parties <- party_combined_results |> distinct(political_party) |> pull(political_party) 
+gtsave(sd_summary_table, "sd_party_table.png")
+```
 
-party_combined_results |> 
-  group_by(political_party) |> 
-  group_map(~ { # group_map runs automatically for each party without repeating the code manually
-    mat <- .x |> 
-      select(nrc_lexicon, robertuito_transformer, gemini_llm) |> 
-      mutate(across(everything(), ~ as.numeric(factor(., 
-                                                      levels = c("negative", "neutral", "positive"))))) |> 
-      t()
-    kripp.alpha(mat, method = "nominal")
-  }) |> 
-  setNames(parties)
+Interpretation: the standard deviation indicates how much sentiment percentages
+vary across parties within each model.
+
+- **Low SD (NRC)** → the model assigns roughly the same sentiment distribution
+  regardless of party — it is not sensitive to party identity.
+- **High SD (RoBERTuito / Gemini)** → sentiment percentages vary considerably by
+  party — the model responds differently to different parties' language.
+
+
+### 9. Create sub-dataframes 
+
+### 9.1 Subdataframe of agreement results
+
+The following data frame is a subset of tweets where all of the models produced the same output for the same tweet id.
+
+```{r}
+perfect_agreement_df <- combined_results |> 
+  filter(
+    !is.na(gemini_llm),
+    nrc_lexicon == robertuito_transformer & nrc_lexicon == gemini_llm) |> 
+  # Join with the dataset that contains the tweet text and political party
+  left_join(
+    nrc_results |> select(id, political_party, tweet), by = "id") |> 
+  relocate(political_party, tweet, .after = id) #Move political_party and tweet right after the 'id' column
+
+perfect_agreement_df
+```
+
+```{r}
+write.csv(perfect_agreement_df, "Perfect_agreement_df.csv", row.names = FALSE)
+```
+
+### 9.1 Subdataframe of disagreement results
+
+```{r}
+disagreement_df <- combined_results |> 
+  # 1. Clean out any rows with NA values first
+  filter(!is.na(gemini_llm)) |> 
+  # 2. Drop any row that is found in your perfect agreement dataframe
+  anti_join(perfect_agreement_df, by = "id") |> 
+  left_join(
+    nrc_results |> select(id, political_party, tweet), by = "id") |> 
+  relocate(political_party, tweet, .after = id) #Move political_party and tweet right after the 'id' column
+
+disagreement_df
+```
+
+```{r}
+write.csv(disagreement_df, "Disagreement_df.csv", row.names = FALSE)
+```
+
+#### 9.3 Subdataframe of NA's in Gemini
+
+```{r}
+missing_gemini <- combined_results |> 
+  filter(is.na(gemini_llm)) |> 
+  left_join(
+    nrc_results |> select(id, political_party, tweet), by = "id") |> 
+  relocate(political_party, tweet, .after = id)
+
+missing_gemini
 ```
 
 
