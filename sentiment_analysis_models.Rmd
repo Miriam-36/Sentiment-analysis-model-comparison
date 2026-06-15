@@ -954,10 +954,10 @@ gtsave(party_kripp_table, "krippendorff_party_table.png")
 
 ---
 
-##### Krippendorff's Alpha by party and model pair (heatmap)
+##### Krippendorff's Alpha by party and model pair (line graph)
 
 ```{r kripp-pairs-by-party}
-# CHANGED: uses model_labels, party_labels_abbr, party_levels_abbr from §8.2
+# Data: pairwise Krippendorff's Alpha per party, ordered left-to-right ideologically
 kripp_pairs_party <- combined_results |>
   group_by(political_party) |>
   group_map(.keep = TRUE, ~ {
@@ -977,34 +977,97 @@ kripp_pairs_party <- combined_results |>
                  "vs",
                  recode(model_2, !!!model_labels)),
     political_party = factor(recode(political_party, !!!party_labels_abbr),
-                             levels = party_levels_abbr)
+                             levels = party_levels_abbr)  # ideological left-to-right order
   )
 
-ggplot(kripp_pairs_party,
-       aes(x = pair, y = political_party, fill = alpha)) +
-  geom_tile(color = "white", linewidth = 0.8) +
-  geom_text(aes(label = round(alpha, 2)), size = 3.5, fontface = "bold") +
-  scale_fill_gradient2(
-    low      = "#e74c3c",
-    mid      = "#f9e79f",
-    high     = "#2ecc71",
-    midpoint = median(kripp_pairs_party$alpha, na.rm = TRUE),
-    name     = "α"
+# Add global (all-model) alpha per party as a fourth line
+kripp_global_party <- combined_results |>
+  group_by(political_party) |>
+  group_map(.keep = TRUE, ~ {
+    mat <- .x |>
+      select(nrc_lexicon, robertuito_transformer, gemini_llm) |>
+      mutate(across(everything(), to_numeric_sentiment)) |>
+      t()
+    result <- kripp.alpha(mat, method = "nominal")
+    tibble(
+      political_party = .x$political_party[1],
+      pair            = "All Models Combined",
+      alpha           = result$value
+    )
+  }) |>
+  bind_rows() |>
+  mutate(political_party = factor(recode(political_party, !!!party_labels_abbr),
+                                  levels = party_levels_abbr))
+
+# Combine pairwise and global lines
+kripp_lines_data <- bind_rows(
+  kripp_pairs_party |> select(political_party, pair, alpha),
+  kripp_global_party
+) |>
+  mutate(pair = factor(pair, levels = c(
+    "NRC vs RoBERTuito",
+    "NRC vs Gemini",
+    "RoBERTuito vs Gemini",
+    "All Models Combined"
+  )))
+
+# Line colours: NRC pairs muted, RoBERTuito-Gemini highlighted, global dashed
+pair_colours <- c(
+  "NRC vs RoBERTuito"    = "#e74c3c",
+  "NRC vs Gemini"        = "#e67e22",
+  "RoBERTuito vs Gemini" = "#2ecc71",
+  "All Models Combined"  = "#2c3e50"
+)
+
+pair_linetypes <- c(
+  "NRC vs RoBERTuito"    = "solid",
+  "NRC vs Gemini"        = "solid",
+  "RoBERTuito vs Gemini" = "solid",
+  "All Models Combined"  = "dashed"
+)
+
+kripp_linegraph_party_pairs <- ggplot(
+  kripp_lines_data,
+  aes(x = political_party, y = alpha,
+      colour = pair, linetype = pair, group = pair)
+) +
+  geom_hline(yintercept = 0, colour = "grey60", linewidth = 0.4) +  # zero reference
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2.5) +
+  scale_colour_manual(values = pair_colours, name = "Model Pair") +
+  scale_linetype_manual(values = pair_linetypes, name = "Model Pair") +
+  scale_y_continuous(
+    limits = c(-0.2, 0.6),
+    breaks = seq(-0.2, 0.6, by = 0.1)
   ) +
-  labs(title = "Krippendorff's Alpha by Model Pair and Political Party",
-       x = "Model Pair", y = "Political Party") +
-  theme_minimal() +
-  theme(panel.grid  = element_blank(),
-        axis.text.x = element_text(angle = 20, hjust = 1))
+  labs(
+    title   = "Krippendorff's Alpha by Model Pair and Political Party",
+    subtitle = "Parties ordered left to right on the ideological spectrum",
+    x       = "Political Party (left → right)",
+    y       = "Krippendorff's Alpha (α)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position  = "bottom",
+    legend.title     = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_line(colour = "grey90")
+  )
+
+kripp_linegraph_party_pairs
 ```
+
+```{r}
+ggsave("kripp_linegraph_party_pairs.png", width = 9, height = 5.5, dpi = 300)
+```
+
 
 ---
 
 ##### Visualisation: sentiment distribution by model and party
 
-```{r party-sentiment-distribution}
-# CHANGED: uses all shared factor objects; no repeated recode blocks
-combined_results |>
+```{r party-sentiment-distribution,  fig.height= 7, fig.width= 6}
+plot_by_model_party <- combined_results |>
   pivot_longer(cols      = c(nrc_lexicon, robertuito_transformer, gemini_llm),
                names_to  = "model",
                values_to = "sentiment") |>
@@ -1021,24 +1084,61 @@ combined_results |>
   mutate(pct = round(n / sum(n) * 100, 1)) |>
   ungroup() |>
   ggplot(aes(x = sentiment, y = pct, fill = sentiment)) +
-  geom_col() +
+  geom_col(width = 1.0) +
   facet_grid(political_party ~ model) +
   scale_fill_manual(values = sentiment_colours) +
+  scale_y_continuous(limits = c(0, 75), expand = expansion(mult = c(0, 0.05))) +
+  scale_x_discrete(expand = expansion(add = 2)) + 
   labs(title = "Sentiment distribution by model and party",
-       x = "Sentiment", y = "Percentage") +
+       x = "Sentiment distribution", y = "Percentage") +
   theme_minimal() +
   theme(legend.position   = "bottom",
         panel.grid        = element_blank(),
         strip.text.x      = element_text(size = 11),
-        strip.text.y      = element_text(size = 10, angle = 0),
+        strip.text.y      = element_text(size = 10, angle = 0, hjust = 0),
         strip.background  = element_blank(),
         axis.text.x       = element_blank(),
         axis.ticks.x      = element_blank(),
-        panel.border      = element_blank())
+        panel.border      = element_blank(),
+        panel.spacing.y   = unit(0.2, "lines"),              
+        axis.text.y       = element_text(size = 6.5),
+        panel.grid.major.y = element_line(color = "grey90"))
+plot_by_model_party
+```
+
+
+```{r party-sentiment-distribution,  fig.height= 7, fig.width= 6}
+library(patchwork)
+library(grid)
+
+arrow_plot <- ggplot() +
+  # Political Spectrum label in middle
+  annotate("text", x = 0.5, y = 0.5, label = "Political\nSpectrum", 
+           size = 3, fontface = "bold", hjust = 0.5) +
+  # top arrow (Left-wing)
+  annotate("segment", x = 0.5, xend = 0.5, y = 0.55, yend = 1,
+           arrow = grid::arrow(length = unit(0.2, "cm")), color = "black") +
+  annotate("text", x = 0.7, y = 0.77, label = "Left", 
+           size = 3.5, angle = 270, hjust = 0.5) +
+  # bottom arrow (Right-wing)
+  annotate("segment", x = 0.5, xend = 0.5, y = 0.45, yend = 0,
+           arrow = grid::arrow(length = unit(0.2, "cm")), color = "black") +
+  annotate("text", x = 0.7, y = 0.23, label = "Right", 
+           size = 3.5, angle = 270, hjust = 0.5) +
+  theme_void() +
+  xlim(0, 1) + ylim(0, 1)
+
+
+arrow_plot
+```
+
+
+```{r party-sentiment-distribution,  fig.height= 7, fig.width= 7}
+plot_by_model_party + arrow_plot + plot_layout(widths = c(10, 3))
 ```
 
 ```{r}
-ggsave("Party_sentiment_distribution.png", width = 8, height = 5, dpi = 300)
+ggsave("Party_sentiment_distribution.png", width = 6, height = 7, dpi = 300)
 ```
 
 ---
@@ -1063,7 +1163,7 @@ sd_summary <- combined_results |>
 sd_summary_table <- sd_summary |>
   gt() |>
   tab_header(
-    title    = "Sentiment Variability Across Political Parties",
+    title    = "Sentiment Variance Across Political Parties",
     subtitle = "Standard deviation of sentiment percentages by model"
   ) |>
   cols_label(model = "Model", sd = "SD") |>
