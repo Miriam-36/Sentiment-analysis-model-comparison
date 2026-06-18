@@ -21,7 +21,7 @@ library(udpipe)
 ### 1. Load data
 
 ```{r}
-twitter_data <- read.csv("tweets_political_parties_es.csv", colClasses = c(id = "character"))
+twitter_data <- read.csv("Data/tweets_political_parties_es.csv", colClasses = c(id = "character"))
 ```
 
 ### 2. Clean tweet text
@@ -128,52 +128,10 @@ twitter_lexicon <- twitter_data |>
 Save this as a csv
 
 ```{r}
-# write.csv(twitter_lexicon, "twitter_lexicon_and_transformer_clean.csv", row.names = FALSE)
+write.csv(twitter_lexicon, "Data/twitter_lexicon_and_transformer_clean.csv", row.names = FALSE)
 ```
 
 #### 3.3. Lexicon model: NRC
-
-Lemmatize the text function
-
-```{r}
-# Function to lemmatize Spanish text
-lemmatize_spanish <- function(text, model) {
-  # If text is empty, return empty
-  if (nchar(text) == 0) return("")
-  
-  # Annotate the text
-  annotation <- udpipe_annotate(model, x = text)
-  df <- as.data.frame(annotation)
-  
-  # Paste the 'lemma' column back together into a single string
-  lemmatized_text <- paste(df$lemma, collapse = " ")
-  return(lemmatized_text)
-}
-```
-
-Download the Spanish model
-
-```{r}
-# udpipe_download_model(language = "spanish")  # only download once
-ud_model <- udpipe_load_model("spanish-gsd-ud-2.5-191206.udpipe")
-```
-
-REVISE LEMMATISATION ----------------------------------------------------
-
-Apply lemmatisation to the text (clean_lexicon_text)
-
-```{r}
-# twitter_lexicon <- twitter_lexicon |> 
-#  mutate(lemmatized_text = map_chr(clean_lexicon_text, lemmatize_spanish, model = ud_model))
-```
-
-After it has been run once, save to use for other models
-
-```{r}
-#write.csv(twitter_lexicon, "twitter_lexicon_lemmatized.csv", row.names = FALSE)
-```
-
-END OF LEMMATISATION -----------------------------------------------------
 
 ##### Run NRC
 
@@ -192,7 +150,7 @@ nrc_results <- bind_cols(
 ##### Save the results of NRC
 
 ```{r}
-write.csv(nrc_results, "NRC_results.csv", row.names = FALSE)
+write.csv(nrc_results, "Data/NRC_results.csv", row.names = FALSE)
 ```
 
 ### 4. Trasformer-based model: RoBERTuito
@@ -200,7 +158,7 @@ write.csv(nrc_results, "NRC_results.csv", row.names = FALSE)
 #### 4.1 Open clean data
 
 ```{r}
-clean_data <- read.csv("twitter_lexicon_and_transformer_clean.csv", colClasses = c(id = "character"))
+clean_data <- read.csv("Data/twitter_lexicon_and_transformer_clean.csv", colClasses = c(id = "character"))
 ```
 
 #### 4.2 Install prerequisites
@@ -254,7 +212,7 @@ robertuito_results <- cbind(clean_data[, c("id", "political_party", "tweet")], r
 #### 4.7 Save results
 
 ```{r}
-write.csv(robertuito_results, "RoBERTuito_results.csv", row.names = FALSE)
+write.csv(robertuito_results, "Data/RoBERTuito_results.csv", row.names = FALSE)
 ```
 
 
@@ -280,7 +238,7 @@ library(jsonlite)
 Read data and select only the columns needed
 
 ```{r prepare-data}
-my_data <- read.csv("twitter_lexicon_and_transformer_clean.csv", colClasses = c(id = "character"))
+my_data <- read.csv("Data/twitter_lexicon_and_transformer_clean.csv", colClasses = c(id = "character"))
 
 my_data <- my_data |> select(id, political_party, text_clean)
 
@@ -392,7 +350,7 @@ for (i in 1:total_batches) {
     failed_batches <- c(failed_batches, i)
     write(
       sprintf("FAILED batch %d at %s", i, Sys.time()),
-      file = "failed_batches.log",
+      file = "Data/failed_batches.log",
       append = TRUE
     )
   }
@@ -409,7 +367,7 @@ for (i in 1:total_batches) {
   # With ~1,480 batches, saving every 50 means up to 49 batches of lost work
   # after a crash. Every 15 limits that loss to at most 14 batches.
   if (i %% 15 == 0) {
-    saveRDS(results_list, "partial_results.rds")
+    saveRDS(results_list, "Data/partial_results.rds")
     message(sprintf("Checkpoint saved at batch %d.", i))
   }
 
@@ -419,7 +377,7 @@ for (i in 1:total_batches) {
 }
 
 # Final checkpoint save
-saveRDS(results_list, "partial_results.rds")
+saveRDS(results_list, "Data/partial_results.rds")
 
 # Summary of failures
 if (length(failed_batches) > 0) {
@@ -442,7 +400,7 @@ final_sentiments <- bind_rows(results_list) |>
 # Join back to the original data (tweets with no result will show NA)
 final_data <- my_data |>  left_join(final_sentiments, by = "id")
 
-write.csv(final_data, "Gemini_results.csv", row.names = FALSE)
+write.csv(final_data, "Data/Gemini_results.csv", row.names = FALSE)
 
 message(sprintf(
   "Saved %d rows. Rows with missing sentiment (NA): %d",
@@ -462,7 +420,7 @@ The output has produced the same number of rows but there are 1355 rows with mis
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Load the checkpoint so we don't lose the 1,414 batches that succeeded
-results_list <- readRDS("partial_results.rds")
+results_list <- readRDS("Data/partial_results.rds")
 
 # The 66 failed batch IDs from the log
 failed_batches <- c(22, 27, 34, 40, 90, 103, 107, 118, 119, 143, 147, 183,
@@ -557,7 +515,7 @@ for (i in failed_batches) {
 }
 
 # Save updated results
-saveRDS(results_list, "partial_results.rds")
+saveRDS(results_list, "Data/partial_results.rds")
 
 # Summary
 message(sprintf("\nRetry complete. Recovered %d of %d failed batches.",
@@ -575,7 +533,7 @@ After retrying the code I have recovered 4 of 66 failed batches only. Those batc
 
 ```{r rebuild-final-csv}
 
-results_list <- readRDS("partial_results.rds")
+results_list <- readRDS("Data/partial_results.rds")
 
 # Rebuild the final CSV with the recovered batches included
 final_sentiments <- bind_rows(results_list)
@@ -584,7 +542,7 @@ final_data <- my_data %>%
   left_join(final_sentiments, by = "id") %>%
   distinct(id, .keep_all = TRUE)  # remove duplicate rows
 
-write.csv(final_data, "Gemini_results.csv", row.names = FALSE)
+write.csv(final_data, "Data/Gemini_results.csv", row.names = FALSE)
 
 message(sprintf(
   "Saved %d rows. Rows with missing sentiment (NA): %d",
@@ -600,7 +558,7 @@ The standarisation process requieres that the data is numeric. Since there are N
 #### 6.1 NRC
 
 ```{r}
-nrc_results <- read.csv("NRC_results.csv", colClasses = c(id = "character"))
+nrc_results <- read.csv("Data/NRC_results.csv", colClasses = c(id = "character"))
 ```
 
 ##### Function to select one single label
@@ -629,13 +587,13 @@ nrc_results$nrc_lexicon <- sapply(1:nrow(nrc_results), function(i) choose_label(
 Substitute the old csv with new one, where only a new column is added ("nrc_lexicon")
 
 ```{r}
-write.csv(nrc_results, "NRC_results.csv", row.names = FALSE)
+write.csv(nrc_results, "Data/NRC_results.csv", row.names = FALSE)
 ```
 
 #### 6.2 RoBERTuito
 
 ```{r}
-robertuito_results <- read.csv("RoBERTuito_results.csv", colClasses = c(id = "character"))
+robertuito_results <- read.csv("Data/RoBERTuito_results.csv", colClasses = c(id = "character"))
 ```
 
 ##### Change labels
@@ -654,7 +612,7 @@ robertuito_results <- robertuito_results |>
 ##### save the results
 
 ```{r}
-write.csv(robertuito_results, "RoBERTuito_results.csv", row.names = FALSE)
+write.csv(robertuito_results, "Data/RoBERTuito_results.csv", row.names = FALSE)
 ```
 
 #### 6.3 Gemini
@@ -662,7 +620,7 @@ write.csv(robertuito_results, "RoBERTuito_results.csv", row.names = FALSE)
 Load the Gemini results
 
 ```{r read Gemini results}
-gemini_results <- read.csv("Gemini_results.csv", colClasses = c(id = "character"))
+gemini_results <- read.csv("Data/Gemini_results.csv", colClasses = c(id = "character"))
 ```
 
 ```{r add gemini llm column}
@@ -671,7 +629,7 @@ gemini_results <- gemini_results |> select(-text_clean.y) |>
 ```
 
 ```{r}
-write.csv(gemini_results, "Gemini_results.csv", row.names = FALSE)
+write.csv(gemini_results, "Data/Gemini_results.csv", row.names = FALSE)
 ```
 
 ### 7. Join dataframes 
@@ -687,11 +645,10 @@ combined_results <- list(
 ```
 
 ```{r}
-write.csv(combined_results, "models_combined_results.csv", row.names = FALSE)
+write.csv(combined_results, "Data/models_combined_results.csv", row.names = FALSE)
 ```
 
 ### 8. Sentiment distributions and Krippendorff's Alpha 
-
 #### 8.1 Libraries
 
 ```{r libraries}
@@ -703,7 +660,7 @@ library(purrr)
 #### 8.2 Load data and shared factor definitions
 
 ```{r load combined results}
-combined_results <- read.csv("models_combined_results.csv", colClasses = c(id = "character"))
+combined_results <- read.csv("Data/models_combined_results.csv", colClasses = c(id = "character"))
 ```
 
 ```{r models and party labels}
@@ -815,7 +772,7 @@ combined_results |>
 ```
 
 ```{r}
-ggsave("Models_sentiment_distribution.png", width = 8, height = 5, dpi = 300)
+ggsave("Figures_and_tables/Models_sentiment_distribution.png", width = 8, height = 5, dpi = 300)
 ```
 
 #### 8.4 Party-specific and political sentiment distribution
@@ -893,7 +850,7 @@ plot_by_model_party + arrow_plot + plot_layout(widths = c(10, 3))
 ```
 
 ```{r}
-ggsave("Party_sentiment_distribution.png", width = 7, height = 7, dpi = 300)
+ggsave("Figures_and_tables/Party_sentiment_distribution.png", width = 7, height = 7, dpi = 300)
 ```
 
 ##### Standard deviation of sentiment percentages across parties
@@ -925,7 +882,7 @@ sd_summary_table
 ```
 
 ```{r}
-gtsave(sd_summary_table, "sd_party_table.png")
+gtsave(sd_summary_table, "Figures_and_tables/sd_party_table.png")
 ```
 
 Interpretation: the standard deviation indicates how much sentiment percentages
@@ -969,7 +926,7 @@ kripp_table
 ```
 
 ```{r}
-gtsave(kripp_table, "kripp_table.png")
+gtsave(kripp_table, "Figures_and_tables/kripp_table.png")
 ```
 Interpretation: the Krippendorff’s Alpharanges from -1 to 1, where:
 - 1 indicates perfect agreement between the models
@@ -1008,9 +965,8 @@ kripp_pairs_table
 ```
 
 ```{r}
-gtsave(kripp_pairs_table, "kripp_pairs_table.png")
+gtsave(kripp_pairs_table, "Figures_and_tables/kripp_pairs_table.png")
 ```
-
 
 #### 8.4 Party-level Agreement Analysis
 
@@ -1053,7 +1009,7 @@ party_kripp_table
 ```
 
 ```{r}
-gtsave(party_kripp_table, "krippendorff_party_table.png")
+gtsave(party_kripp_table, "Figures_and_tables/krippendorff_party_table.png")
 ```
 
 ---
@@ -1162,11 +1118,19 @@ kripp_linegraph_party_pairs
 ```
 
 ```{r}
-ggsave("kripp_linegraph_party_pairs.png", width = 9, height = 5.5, dpi = 300)
+ggsave("Figures_and_tables/kripp_linegraph_party_pairs.png", width = 9, height = 5.5, dpi = 300)
 ```
 
 
 ### 9. Create sub-dataframes 
+
+```{r load combined results}
+combined_results <- read.csv("Data/models_combined_results.csv", colClasses = c(id = "character"))
+```
+
+```{r}
+nrc_results <- read.csv("Data/NRC_results.csv", colClasses = c(id = "character"))
+```
 
 ### 9.1 Subdataframe of agreement results
 
@@ -1186,7 +1150,7 @@ perfect_agreement_df
 ```
 
 ```{r}
-write.csv(perfect_agreement_df, "Perfect_agreement_df.csv", row.names = FALSE)
+write.csv(perfect_agreement_df, "agreement_and_disagreement_df/Perfect_agreement_df.csv", row.names = FALSE)
 ```
 
 ### 9.1 Subdataframe of disagreement results
@@ -1205,7 +1169,7 @@ disagreement_df
 ```
 
 ```{r}
-write.csv(disagreement_df, "Disagreement_df.csv", row.names = FALSE)
+write.csv(disagreement_df, "agreement_and_disagreement_df/Disagreement_df.csv", row.names = FALSE)
 ```
 
 #### 9.3 Subdataframe of NA's in Gemini
@@ -1213,9 +1177,12 @@ write.csv(disagreement_df, "Disagreement_df.csv", row.names = FALSE)
 ```{r}
 missing_gemini <- combined_results |> 
   filter(is.na(gemini_llm)) |> 
-  left_join(
-    nrc_results |> select(id, political_party, tweet), by = "id") |> 
   relocate(political_party, tweet, .after = id)
 
 missing_gemini
 ```
+
+```{r}
+write.csv(missing_gemini, "agreement_and_disagreement_df/Gemini_missing_df.csv", row.names = FALSE)
+```
+
