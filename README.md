@@ -1,5 +1,4 @@
 # Sentiment-analysis-model-comparison
-# Sentiment-analysis-model-comparison
 
 > Political Polarisation in Social Media in Spain: A Comparative Study of Sentiment Analysis Models using R
 > **Master's Thesis Code Repository** — Miriam Lim Leal
@@ -23,9 +22,9 @@ The objective of this project is to investigate whether architectural difference
 
 ### Models Used
 
-- 📖 **Lexicon-Based**: NRC Word-Emotion Association Lexicon via the `syuzhet` framework
-- 🤖 **Transformer-Based**: RoBERTuito — optimized for Spanish social media syntax and slang
-- 💬 **LLM**: Gemini 2.5 Flash Lite — asynchronous batch JSON API, temperature = 0.0
+- **Lexicon-Based**: NRC Word-Emotion Association Lexicon via the `syuzhet` framework
+- **Transformer-Based**: RoBERTuito — optimized for Spanish social media syntax and slang
+- **LLM**: Gemini 2.5 Flash Lite — asynchronous batch JSON API, temperature = 0.0
 
 ---
 
@@ -52,7 +51,7 @@ The objective of this project is to investigate whether architectural difference
 
 ---
 
-## ⚙️ Installation and Setup
+## Installation and Setup
 
 ### 1. R Packages
 
@@ -90,3 +89,56 @@ pip install transformers torch pysentimiento numpy h5py scipy
 ### 3. API Key Configuration
 
 Open your R environment file with `usethis::edit_r_environ()` and add:
+GEMINI_KEY=your_actual_api_token_here
+
+---
+
+## Data Structure
+
+The pipeline runs over **29,594 unique tweets** categorised across the Spanish political spectrum:
+
+| Ideology | Party |
+|---|---|
+| Far-left | Esquerra Republicana de Catalunya (ERC) |
+| Left | Podemos (Unidas Podemos / UP) |
+| Centre / Centre-Left | PSOE & Ciudadanos (Cs) |
+| Right | Partido Popular (PP) |
+| Far-right | Vox |
+
+> ⚠️ **Note:** Ensure your working directory contains `Data/tweets_political_parties_es.csv` and `emoji_mapping_es.xlsx` before running.
+
+---
+
+## Usage Workflow
+
+All analysis lives inside `sentiment_analysis_models.Rmd`. Components can be run in isolation:
+
+1. **Text Cleaning** — strips URLs, mentions, and whitespace anomalies
+2. **Lexicon Modelling** — emoji replacement and NRC Spanish scoring
+3. **Transformer Pipeline** — RoBERTuito via `reticulate` and `pysentimiento`
+4. **LLM Batch Engine** — Gemini API in chunks of 20, with rate-limiting and retry handling
+5. **Output Processing** — results saved to `agreement_and_disagreement_df/`:
+   - `Perfect_agreement_df.csv` — tweets where all three models agree
+   - `disagreement_df.csv` — high-ambiguity tweets where models diverge
+
+---
+
+## Future Enhancements
+
+- **GPU Scaling** — replace local execution with native fine-tuning on dedicated GPU runtimes
+- **Longitudinal Analysis** — extend beyond the 2020 pandemic timeline
+- **Ambiguity Modules** — targeted processing for sarcasm, irony, and regional colloquialisms
+
+---
+
+## Conclusion
+
+This project suggests that model architecture plays a significant role in shaping sentiment classification outcomes in political discourse.
+The findings underscore that model selection is not a neutral methodological choice and highlight the importance of domain-specific sentiment 
+detection for sociological analyses such as political monitoring in social media.
+
+---
+
+## ⚠️ Disclaimer
+
+This project was developed exclusively for academic purposes as part of the **Master's Degree in Computational Social Science** at **Universidad Carlos III de Madrid**. Distributed under a **Creative Commons Attribution – Non Commercial – No Derivatives** license. Commercial reuse is prohibited.
